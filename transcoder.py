@@ -2,6 +2,7 @@ from typing import Callable, Optional, Union
 from pathlib import Path
 from abc import ABC
 from re import findall, finditer
+from itertools import chain
 from tempfile import TemporaryDirectory, TemporaryFile
 from subprocess import run
 
@@ -13,26 +14,39 @@ def resolve_path(path: Union[str, Path]) -> Path:
 
 
 class _DataType(ABC):
-    __slots__ = ('codec', 'bitrate', 'language')
+    __slots__ = ('index', 'codec', 'language', 'source')
 
-    def __init__(self, codec: str, bitrate: float, language: str):
+    def __init__(self, index: int, codec: str, language: str, source: Path):
+        assert isinstance(index, int)
         assert isinstance(codec, str)
-        assert isinstance(bitrate, float)
         assert isinstance(language, str)
+        assert isinstance(source, Path)
+        self.index = index
         self.codec = codec
-        self.bitrate = bitrate
         self.language = language
+        self.source = source
 
 
 class Video(_DataType):
-    __slots__ = ('resolution', 'fps')
+    __slots__ = ('resolution', 'bitrate', 'fps')
 
-    def __init__(self, codec: str, bitrate: float, language: str, resolution: tuple[int, int], fps: float):
-        super().__init__(codec, bitrate, language)
+    def __init__(
+            self,
+            index: int,
+            codec: str,
+            language: str,
+            bitrate: Optional[float],
+            source: Union[str, Path],
+            resolution: tuple[int, int],
+            fps: float
+    ):
+        super().__init__(index, codec, language, source)
+        assert isinstance(bitrate, float) or bitrate is None
         assert isinstance(resolution, tuple)
         assert isinstance(resolution[0], int)
         assert isinstance(resolution[1], int)
         assert isinstance(fps, float)
+        self.bitrate = bitrate
         self.resolution = resolution
         self.fps = fps
 
@@ -41,52 +55,101 @@ class Video(_DataType):
 
 
 class Audio(_DataType):
-    __slots__ = ('frequency', )
+    __slots__ = ('frequency', 'bitrate')
 
-    def __init__(self, codec: str, bitrate: float, language: str, frequency: int):
-        super().__init__(codec, bitrate, language)
+    def __init__(
+            self,
+            index: int,
+            codec: str,
+            language: str,
+            bitrate: Optional[float],
+            source: Union[str, Path],
+            frequency: int
+    ):
+        super().__init__(index, codec, language, source)
+        assert isinstance(bitrate, float) or bitrate is None
         assert isinstance(frequency, int)
+        self.bitrate = bitrate
         self.frequency = frequency
 
     def __repr__(self) -> str:
         return f"<Audio layer codec={self.codec} frequency={self.frequency}>"
 
 
-def info_parse(info: str) -> tuple[list[Video], list[Audio]]:
-    output = ([], [])
-    for line in findall(r'Stream #0:(\d)\[0x\d]\((\w+)\): (Video|Audio): (\w+) [^,]*(.+)', info):
-        language = line[1]
-        codec = line[3]
-        bitrate = float(next(finditer(r' (\d+) kb/s', line[4])).group(1))
-        if line[2] == 'Video':
-            resolution = next(finditer(r'(\d+)x(\d+)', line[4]))
+class Subtitles(_DataType):
+    def __repr__(self) -> str:
+        return f"<Subtitles layer codec={self.codec} language={self.language}>"
+
+
+def info_parse(info: str, source: Union[str, Path]) -> tuple[list[Video], list[Audio], list[Subtitles]]:
+    output = ([], [], [])
+    pattern = r'Stream #0:(\d)(\[[^]]*\])?\(?(\w+)?\)?: (Video|Audio|Subtitle): (\w+) ?[^,\n]*([^\n]*)'
+    # : (Video|Audio|Subtitle): (\w+) ?[^,\n]*([^\n]*)
+    for line in findall(pattern, info):
+        language = line[2]
+        codec = line[4]
+        index = int(line[0])
+        try:
+            bitrate = float(next(finditer(r' (\d+) kb/s', line[5])).group(1))
+        except StopIteration:
+            bitrate = None
+        if line[3] == 'Video':
+            resolution = next(finditer(r'(\d+)x(\d+)', line[5]))
             resolution = resolution.groups()
             resolution = (int(resolution[0]), int(resolution[1]))
-            fps = float(next(finditer(r'(\d+) fps', line[4])).group(1))
+            fps = float(next(finditer(r'(\d+.?\d+) fps', line[5])).group(1))
             output[0].append(Video(
+                index=index,
                 codec=codec,
-                bitrate=bitrate,
                 language=language,
+                source=source,
+                bitrate=bitrate,
                 resolution=resolution,
                 fps=fps
             ))
-            # output.append(Video(
-            #     codec=line[3],
-            #     language=line[1],
-            #
-            # ))
-        elif line[2] == 'Audio':
-            frequency = int(next(finditer(r' (\d+) Hz', line[4])).group(1))
+        elif line[3] == 'Audio':
+            frequency = int(next(finditer(r' (\d+) Hz', line[5])).group(1))
             output[1].append(Audio(
+                index=index,
                 codec=codec,
-                bitrate=bitrate,
                 language=language,
+                source=source,
+                bitrate=bitrate,
                 frequency=frequency
             ))
+        elif line[3] == 'Subtitle':
+            output[2].append(Subtitles(
+                index=index,
+                codec=line[4],
+                language=line[2],
+                source=source
+            ))
         else:
+            print(line)
             raise RuntimeError()
     return output
 
+
+class MediaContainer:
+    __slots__ = ('objects', )
+
+    def __init__(self, *objects: _DataType):
+        self.objects = list(objects)
+
+    def __add__(self, other: 'MediaContainer'):
+        assert isinstance(other, MediaContainer)
+        return type(self)(*self.objects, *other.objects)
+
+    @classmethod
+    def from_datatypes(
+            cls,
+            values: tuple[list[Video], list[Audio], list[Subtitles]]
+    ):
+        return cls(*chain.from_iterable(values))
+
+    def add(self, data: _DataType) -> None:
+        assert isinstance(data, _DataType)
+        self.objects.append(data)
 
 class FFMpeg:
     __slots__ = ('ffmpeg', '_tempDirectory', '_tempDirectory_path')
@@ -117,6 +180,7 @@ class FFMpeg:
         self._tempDirectory_path = None
 
     def _call_ffmpeg(self, parameters: str) -> str:
+        print(parameters)
         with TemporaryFile(mode='r+') as f:
             run(
                 f"{self.ffmpeg} {parameters}",
@@ -128,13 +192,44 @@ class FFMpeg:
             f.seek(0)
             return f.read()
 
-    def get_info(self, path: Union[str, Path]):
+    def build_mc(self, path: Union[str, Path], mc: MediaContainer, overwrite_ok: bool = False):
+        assert isinstance(mc, MediaContainer)
+        assert isinstance(overwrite_ok, bool)
+        path = resolve_path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            if overwrite_ok:
+                path.unlink()
+            else:
+                raise ValueError('Trying to overwrite file')
+        inputs_l = list()
+        maps = list()
+        no_subtitles = True if path.name.endswith('.mp4') else False
+        for object in mc.objects:
+            if isinstance(object, Subtitles) and no_subtitles:
+                continue
+            try:
+                input_index = inputs_l.index(object.source)
+            except ValueError:
+                inputs_l.append(object.source)
+                input_index = len(inputs_l)-1
+            maps.append(f"-map {input_index}:{object.index}")
+        self._call_ffmpeg(
+            ' '.join([
+                *[f'-i "{i.absolute()}"' for i in inputs_l],
+                *maps
+            ]) + ' ' +
+            ' -c copy -shortest ' +
+            '"' + str(path.absolute()) + '"'
+        )
+
+    def get_info(self, path: Union[str, Path]) -> tuple[list[Video], list[Audio], list[Subtitles]]:
         path = resolve_path(path)
         if not path.exists():
             raise ValueError('Path is not correct')
         if not path.is_file():
             raise ValueError('Path target is not a files')
-        return info_parse(self._call_ffmpeg(f'-i "{path}"'))
+        return info_parse(self._call_ffmpeg(f'-i "{path}"'), source=path)
 
     def analyze_folders(
             self,
@@ -189,7 +284,11 @@ class FFMpeg:
         else:
             return output
 
-    def extract_audio(self, video_source: Union[str, Path]) -> Path:
+    def extract_audio(self, video_source: Union[str, Path]) -> Audio:
+        """ Extracts aac audio from file to destination
+        :param video_source: Path to source video (.mp4 or .mkv)
+        :return: Path to extracted audio
+        """
         video_source = resolve_path(video_source)
         if not video_source.exists():
             raise ValueError('Path is not correct')
@@ -205,9 +304,9 @@ class FFMpeg:
         # Extract aac
         target_aac = self._tempDirectory_path / f"{video_source.name.split('.')[0]}.aac"
         self._call_ffmpeg(f'-i "{video_source}" -vn -acodec copy "{target_aac}"')
-        return target_aac
+        return self.get_info(target_aac)[1][0]
 
-    def aac_to_wav(self, audio_source: Union[str, Path]) -> Path:
+    def aac_to_wav(self, audio_source: Union[str, Path]) -> Audio:
         audio_source = resolve_path(audio_source)
         if not audio_source.exists():
             raise ValueError('Path is not correct')
@@ -218,9 +317,9 @@ class FFMpeg:
         target_wav = self._tempDirectory_path / f"{audio_source.name.split('.')[0]}.wav"
         self._call_ffmpeg(f'-i "{audio_source}" "{target_wav}"')
 
-        return target_wav
+        return self.get_info(target_wav)[1][0]
 
-    def wav_to_aac(self, audio_source: Union[str, Path]) -> Path:
+    def wav_to_aac(self, audio_source: Union[str, Path]) -> Audio:
         audio_source = resolve_path(audio_source)
         if not audio_source.exists():
             raise ValueError('Path is not correct')
@@ -231,12 +330,12 @@ class FFMpeg:
         target_aac = self._tempDirectory_path / f"{audio_source.name.split('.')[0]}.aac"
         self._call_ffmpeg(f'-i "{audio_source}" "{target_aac}"')
 
-        return target_aac
+        return self.get_info(target_aac)[1][0]
 
     def get_wav(
             self,
             video_source: Union[Path, str]
-    ) -> Path:
+    ) -> Audio:
         video_source = resolve_path(video_source)
 
         if not video_source.exists():
@@ -244,9 +343,9 @@ class FFMpeg:
         if not video_source.is_file():
             raise ValueError('Path target is not a files')
 
-        aac_file = self.extract_audio(video_source)
-        wav_file = self.aac_to_wav(aac_file)
-        return wav_file
+        aac_file: Audio = self.extract_audio(video_source)
+        wav_file: Audio = self.aac_to_wav(aac_file.source)
+        return self.get_info(wav_file.source)[1][0]
 
     def replace_audio_line(
             self,
@@ -291,8 +390,8 @@ class FFMpeg:
         video_source = resolve_path(video_source)
         assert '.' in video_source.name
         wav = self.get_wav(video_source)
-        changer(wav)
-        new_video = self.replace_audio_line(video_source, wav, use_tempdir=True)
+        changer(wav.source)
+        new_video = self.replace_audio_line(video_source, wav.source, use_tempdir=True)
         if replace:
             video_source.unlink()
             new_video.rename(video_source.absolute())
@@ -303,9 +402,36 @@ class FFMpeg:
             new_video.rename(video_source.absolute().parent / name)
 
 
+# TODO: Create many video with different languages
+from timeit import default_timer as timer
+
 def main():
-    with FFMpeg(r'bin/ffmpeg.exe') as ffmpeg:
-        ffmpeg.edit_video('ыф.mp4', lambda x: print(x), replace=False)
+    source_mkv = Path(r'C:\Users\Articha\Desktop\EveryThing\Media\Videos\Anime\Fate\ASaber vs Rider.mkv')
+    videos_folder = Path(r'C:\Users\Articha\Desktop\Temp\Python\translator\Rutube\videos')
+    source_mp4_1 = videos_folder / '8.mp4'
+    source_mp4_2 = videos_folder / '12.mp4'
+    with FFMpeg(r'bin\ffmpeg.exe') as ffmpeg:
+        # ffmpeg.edit_video('ыф.mp4', lambda x: print(x), replace=False)
+        new_folder = videos_folder.parent / 'videos2'
+        start_time = timer()
+        for file in videos_folder.iterdir():
+            if not file.name.endswith('.mp4'):
+                print('what is it', file)
+                continue
+            mp4 = ffmpeg.get_info(file)
+            aac = ffmpeg.extract_audio(file)
+            mc = MediaContainer.from_datatypes(mp4)
+            mc.add(aac)
+            new_name = new_folder / file.name
+            ffmpeg.build_mc(new_name, mc=mc, overwrite_ok=True)
+        print(f'Finished in {timer() - start_time}')
+
+        # mp4_1 = ffmpeg.get_info(source_mp4_1)
+        # aac_2 = ffmpeg.extract_audio(source_mp4_1)
+        # mc = MediaContainer.from_datatypes(mp4_1)
+        # mc.add(aac_2)
+        # ffmpeg.build_mc('file.mp4', mc=mc, overwrite_ok=True)
+        # print()
 
 
 if __name__ == '__main__':
