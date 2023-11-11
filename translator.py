@@ -3,7 +3,6 @@ from collections.abc import Iterable
 from logging import warning
 
 from argostranslate.translate import get_translation_from_codes, ITranslation
-from argostranslate import translate
 from argostranslate.package import get_installed_packages
 
 
