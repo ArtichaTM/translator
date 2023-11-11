@@ -55,6 +55,40 @@ with FFMpeg(path) as ffmpeg:
     # 5.2. replace=False: создаёт файл с суффиксом "_replaced"
     ffmpeg.edit_video('ыф.mp4', lambda x: print(x), replace=False)
 ```
+### Ограничения
+В данный момент попытка занести субтитры в контейнер *.mp4* вызывает неизвестную ошибку. Если требуются субтитры, рекомендуется использовать файл Матроска (.mkv)
+### Скорость
+Все операции копирования выполняются с параметром -v copy (без перекодировки), поэтому предполагается скорость выполнения, приближающаяся к O[1], не учитывая требовательность на постоянную память.
+
+Скорость была протестирована на следующем коде:
+```python
+from pathlib import Path
+from timeit import default_timer as timer
+from transcoder import FFMpeg, MediaContainer
+
+def main():
+    # Папка со всеми датасетами представленными ЦП
+    videos_folder = Path(r'.\Rutube\videos')
+    new_folder = videos_folder.parent / 'videos2'
+    with FFMpeg(r'bin\ffmpeg.exe') as ffmpeg:
+        start_time = timer()
+        for file in videos_folder.iterdir():
+            if not file.name.endswith('.mp4'):
+                print('what is it', file)
+                continue
+            mp4 = ffmpeg.get_info(file)
+            aac = ffmpeg.extract_audio(file)
+            mc = MediaContainer.from_datatypes(mp4)
+            mc.add(aac)
+            new_name = new_folder / file.name
+            ffmpeg.build_mc(new_name, mc=mc, overwrite_ok=True)
+        print(f'Finished in {timer() - start_time}')
+```
+Данный код копирует в каждом видео ту же самую дорожку два раза и прикрепляет в один контейнер *.mp4*.
+Код выполнился со скоростью 28.319 секунд на M.2 накопителе [Samsung 980 PRO](https://www.dns-shop.ru/product/e5bc121a1873ed20/1000-gb-ssd-m2-nakopitel-samsung-980-pro-mz-v8p1t0bw/)
+c *431* запросом к исполняемому файлу ffmpeg.
+
+Для более подробной информации следует обратиться к официальной документации ffmpeg
 ## Субтитры
 Создаёт субтитры на основе начала и конца текста и самого текста
 ### Установка
