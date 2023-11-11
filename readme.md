@@ -30,3 +30,28 @@ from translator import Translator
 translator = Translator()
 print(translator.available_codes()) # prints ['ar', 'az', ..., 'zh', 'zt']
 ```
+## Перекодировщик
+Извлекает из разных форматов видео аудиофайлы. Позволяет конвертировать аудиофайлы в wav, c wav в aac
+### Установка
+* Для использования основного класса *FFMpeg* требуется указать путь к ffmpeg. В линуксе можно просто его установить командой `apt install ffmpeg` и указывать путь `'ffmpeg'`
+### Использование
+```python
+from transcoder import FFMpeg
+
+# Указываем путь к ffmpeg
+path =  'ffmpeg'            # Linux
+path = r'bin/ffmpeg.exe'    # Windows
+
+# Создаём класс и выполняем в контекстном менеджере. Это нужно для того,
+# чтобы в конце удалялись все временные файлы
+with FFMpeg(path) as ffmpeg:
+    # Выполняет следующие операции:
+    # 1. Извлекает из файла аудиодорожку
+    # 2. Конвертирует её в wav
+    # 3. Подаёт путь к wav файлу к функции во втором аргументе
+    # 4. Создаёт контейнер с изначальным видео и новой дорожкой
+    # 5. При параметре replace:
+    # 5.1. repalce=True: заменяет изначальный файл
+    # 5.2. replace=False: создаёт файл с суффиксом "_replaced"
+    ffmpeg.edit_video('ыф.mp4', lambda x: print(x), replace=False)
+```
