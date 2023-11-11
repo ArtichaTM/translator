@@ -68,10 +68,10 @@ def subtitles_write(path: Union[str, Path] = 'sub.srt') -> Generator[int, Union[
 def main():
     xz = subtitles_write('subls.srt')
     next(xz)
-    xz.send(Line(20, 30, 'Hello'))
+    xz.send(Line(20, 30, 'Привет'))
     xz.send([
-        Line(33, 40, 'Q'),
-        Line(44, 50, 'QQ')
+        Line(33, 40, 'Как твои дела?'),
+        Line(44, 50, 'Ты крутой?')
     ])
 
 
