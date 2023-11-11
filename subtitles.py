@@ -18,12 +18,12 @@ class Line:
 
     @staticmethod
     def float_to_srt_time(value: float) -> str:
-        microsecnds = int((value % 1) * 1000)
+        microseconds = int((value % 1) * 1000)
         seconds = int(value % 60)
         minutes = int(value // 60)
         hours = int(minutes // 60)
         minutes = minutes % 60
-        return f"{hours:02.0f}:{minutes:02.0f}:{seconds:02.0f},{microsecnds:03.0f}"
+        return f"{hours:02.0f}:{minutes:02.0f}:{seconds:02.0f},{microseconds:03.0f}"
 
     def as_srt_line(self) -> list[str]:
         return [
