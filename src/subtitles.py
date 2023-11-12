@@ -16,6 +16,12 @@ class Line:
         self.end = end
         self.text = text
 
+    def __repr__(self) -> str:
+        return (f'<Line '
+                f'from {self.float_to_srt_time(self.start)} '
+                f'to {self.float_to_srt_time(self.end)} '
+                f'with text={self.text}>')
+
     @staticmethod
     def float_to_srt_time(value: float) -> str:
         microseconds = int((value % 1) * 1000)

@@ -5,6 +5,16 @@ from re import findall, finditer
 from itertools import chain
 from tempfile import TemporaryDirectory, TemporaryFile
 from subprocess import run
+from queue import Queue
+from threading import Thread
+from random import choices
+from string import ascii_letters
+
+from .subtitles import subtitles_write, Line
+from .translator import Translator
+
+
+__all__ = ('FFMpeg', 'MediaContainer')
 
 
 def resolve_path(path: Union[str, Path]) -> Path:
@@ -151,6 +161,7 @@ class MediaContainer:
         assert isinstance(data, _DataType)
         self.objects.append(data)
 
+
 class FFMpeg:
     __slots__ = ('ffmpeg', '_tempDirectory', '_tempDirectory_path')
 
@@ -167,7 +178,7 @@ class FFMpeg:
             assert 'libavformat' in value, "Can't find libavformat"
             assert 'libavcodec' in value, "Can't find libavcodec"
         except AssertionError as e:
-            raise ValueError('FFMpeg is not correct:', e)
+            raise ValueError('FFMpeg is not correct') from e
 
     def __enter__(self):
         self._tempDirectory = TemporaryDirectory()
@@ -180,7 +191,6 @@ class FFMpeg:
         self._tempDirectory_path = None
 
     def _call_ffmpeg(self, parameters: str) -> str:
-        print(parameters)
         with TemporaryFile(mode='r+') as f:
             run(
                 f"{self.ffmpeg} {parameters}",
@@ -401,9 +411,99 @@ class FFMpeg:
             name = name[:index] + '_replaced' + name[index:]
             new_video.rename(video_source.absolute().parent / name)
 
+    def _texts(
+            self,
+            /,
+            russian_texts: Queue[Line],
+            translated_texts: Queue[list[Line]],
+            audio_codes: set[str],
+            subtitle_codes: set[str]
+    ) -> None:
+        all_codes = audio_codes.union(subtitle_codes)
+        translator = Translator()
+        if 'ru' in subtitle_codes:
+            ru_subs_path = self._tempDirectory_path / f"{''.join(choices(ascii_letters, k=20))}.srt"
+            ru_subs_writer = subtitles_write(ru_subs_path)
+            next(ru_subs_writer)
+            while line := russian_texts.get() is not None:
+                ru_subs_writer.send(line)
+                translated_lines: list[Line] = []
+                for code in all_codes:
+                    translated_lines.append(Line(
+                        start=line.start,
+                        end=line.end,
+                        text=translator.translate(line.text, target=code)
+                    ))
+                translated_texts.put(translated_lines)
+                print(f'Completed translating {line}')
+        else:
+            while line := russian_texts.get() is not None:
+                translated_lines: list[Line] = []
+                for code in all_codes:
+                    translated_lines.append(Line(
+                        start=line.start,
+                        end=line.end,
+                        text=translator.translate(line.text, target=code)
+                    ))
+                translated_texts.put(translated_lines)
+
+    def _translated_texts(
+            self,
+            /,
+            translated_texts: Queue[list[Line]],
+            audio_codes: set[str],
+            subtitle_codes: set[str]
+    ) -> None:
+        while text := translated_texts.get() is not None:
+            pass
+
+    def run(
+            self,
+            source: Path,
+            target: Path,
+            audio_codes: set[str],
+            subtitle_codes: set[str]
+    ) -> None:
+        assert isinstance(source, Path)
+        assert isinstance(target, Path)
+        assert isinstance(audio_codes, set)
+        assert isinstance(subtitle_codes, set)
+        source_info = self.get_info(source)
+        source_container = MediaContainer.from_datatypes(source_info)
+
+        russian_texts: Queue[Line] = Queue(maxsize=0)
+        translated_texts: Queue[list[Line]] = Queue(maxsize=0)
+        text_thread = Thread(
+            target=self._texts,
+            kwargs={
+                'russian_texts': russian_texts,
+                'translated_texts': translated_texts,
+                'audio_codes': audio_codes,
+                'subtitle_codes': subtitle_codes
+            },
+            name='text analyzer thread'
+        )
+        text_thread.start()
+        translated_text_thread = Thread(
+            target=self._translated_texts,
+            kwargs={
+                'translated_texts': translated_texts,
+                'audio_codes': audio_codes,
+                'subtitle_codes': subtitle_codes
+            },
+            name='translated text analyzer thread'
+        )
+        translated_text_thread.start()
+
+        russian_texts.appe
+
+        translated_audio: list[Audio] = []
+        translated_subtitles: list[Video] = []
+
 
 # TODO: Create many video with different languages
 from timeit import default_timer as timer
+
 
 def main():
     source_mkv = Path(r'C:\Users\Articha\Desktop\EveryThing\Media\Videos\Anime\Fate\ASaber vs Rider.mkv')
