@@ -1,3 +1,4 @@
+from functools import partialmethod
 from typing import Callable, Generator, Optional, Union
 from pathlib import Path
 from abc import ABC
@@ -13,6 +14,7 @@ from contextlib import suppress
 
 from .subtitles import subtitles_write, Line
 from .translator import Translator
+from .tts import tts_line
 
 
 __all__ = ('FFMpeg', 'MediaContainer')
@@ -24,14 +26,18 @@ def resolve_path(path: Union[str, Path]) -> Path:
     return path
 
 
+def random_string() -> str:
+    return ''.join(choices(ascii_letters, k=20))
+
 class _DataType(ABC):
     __slots__ = ('index', 'codec', 'language', 'source')
 
-    def __init__(self, index: int, codec: str, language: str, source: Path):
-        assert isinstance(index, int)
-        assert isinstance(codec, str)
-        assert isinstance(language, str)
-        assert isinstance(source, Path)
+    def __init__(self, index: int, codec: str, language: str, source: Path, skip_validators: bool = False):
+        if not skip_validators:
+            assert isinstance(index, int)
+            assert isinstance(codec, str)
+            assert isinstance(language, str)
+            assert isinstance(source, Path)
         self.index = index
         self.codec = codec
         self.language = language
@@ -49,14 +55,16 @@ class Video(_DataType):
             bitrate: Optional[float],
             source: Union[str, Path],
             resolution: tuple[int, int],
-            fps: float
+            fps: float,
+            skip_validators: bool = False
     ):
-        super().__init__(index, codec, language, source)
-        assert isinstance(bitrate, float) or bitrate is None
-        assert isinstance(resolution, tuple)
-        assert isinstance(resolution[0], int)
-        assert isinstance(resolution[1], int)
-        assert isinstance(fps, float)
+        super().__init__(index, codec, language, source, skip_validators=skip_validators)
+        if not skip_validators:
+            assert isinstance(bitrate, float) or bitrate is None
+            assert isinstance(resolution, tuple)
+            assert isinstance(resolution[0], int)
+            assert isinstance(resolution[1], int)
+            assert isinstance(fps, float)
         self.bitrate = bitrate
         self.resolution = resolution
         self.fps = fps
@@ -75,11 +83,13 @@ class Audio(_DataType):
             language: str,
             bitrate: Optional[float],
             source: Union[str, Path],
-            frequency: int
+            frequency: int,
+            skip_validators: bool = False
     ):
-        super().__init__(index, codec, language, source)
-        assert isinstance(bitrate, float) or bitrate is None
-        assert isinstance(frequency, int)
+        super().__init__(index, codec, language, source, skip_validators=skip_validators)
+        if not skip_validators:
+            assert isinstance(bitrate, float) or bitrate is None
+            assert isinstance(frequency, int)
         self.bitrate = bitrate
         self.frequency = frequency
 
@@ -92,7 +102,10 @@ class Subtitles(_DataType):
         return f"<Subtitles layer codec={self.codec} language={self.language}>"
 
 
-def info_parse(info: str, source: Union[str, Path]) -> tuple[list[Video], list[Audio], list[Subtitles]]:
+def info_parse(
+        info: str,
+        source: Union[str, Path]
+) -> tuple[list[Video], list[Audio], list[Subtitles]]:
     output = ([], [], [])
     pattern = r'Stream #0:(\d)(\[[^]]*\])?\(?(\w+)?\)?: (Video|Audio|Subtitle): (\w+) ?[^,\n]*([^\n]*)'
     # : (Video|Audio|Subtitle): (\w+) ?[^,\n]*([^\n]*)
@@ -234,7 +247,13 @@ class FFMpeg:
             '"' + str(path.absolute()) + '"'
         )
 
-    def get_info(self, path: Union[str, Path]) -> tuple[list[Video], list[Audio], list[Subtitles]]:
+    def get_info(
+            self,
+            path: Union[str, Path],
+            skip_validators: bool = False
+    ) -> tuple[list[Video], list[Audio], list[Subtitles]]:
+        if skip_validators:
+            info_parse(self._call_ffmpeg(f'-i "{path}"'), source=path, skip_validators=skip_validators)
         path = resolve_path(path)
         if not path.exists():
             raise ValueError('Path is not correct')
@@ -326,9 +345,17 @@ class FFMpeg:
 
         # Transcode to wav
         target_wav = self._tempDirectory_path / f"{audio_source.name.split('.')[0]}.wav"
-        self._call_ffmpeg(f'-i "{audio_source}" "{target_wav}"')
+        self._call_ffmpeg(f'-i "{audio_source}" -f s16le -acodec pcm_s16le "{target_wav}"')
 
-        return self.get_info(target_wav)[1][0]
+        return Audio(
+            index=None,
+            codec=None,
+            language=None,
+            bitrate=None,
+            source=audio_source,
+            frequency=None,
+            skip_validators=True
+        )
 
     def wav_to_aac(self, audio_source: Union[str, Path]) -> Audio:
         audio_source = resolve_path(audio_source)
@@ -412,21 +439,40 @@ class FFMpeg:
             name = name[:index] + '_replaced' + name[index:]
             new_video.rename(video_source.absolute().parent / name)
 
+    def extract_wav_fragment(self, start: float, end: float, /, wav_file: Audio) -> Audio:
+        pass
+
+    def _stt(
+            self,
+            /,
+            russian_texts: Queue[Line],
+            audio_codes: set[str],
+            subtitle_codes: set[str],
+    ):
+        # TODO: STT
+        from time import sleep
+        russian_texts.put(Line(1, 2, 'Я крутой, не думаешь?', lang='ru'))
+        russian_texts.put(Line(3, 4, 'Кто здесь самый крутой?', lang='ru'))
+        russian_texts.put(Line(4.1, 6.2, 'Я лучший', lang='ru'))
+        sleep(5)
+
     def _texts(
             self,
             /,
             russian_texts: Queue[Line],
             translated_texts: Queue[list[Line]],
             translated_subtitles: list[Subtitles],
+            sentences_origin: Queue[Audio],
             audio_codes: set[str],
-            subtitle_codes: set[str]
+            subtitle_codes: set[str],
+            get_wav_fragment: Callable[[float, float], Audio]
     ) -> None:
         all_codes = audio_codes.union(subtitle_codes).difference({'ru'})
         translator = Translator()
         if 'ru' in subtitle_codes:
-            ru_subs_path = self._tempDirectory_path / f"{''.join(choices(ascii_letters, k=20))}.srt"
+            ru_subs_path = self._tempDirectory_path / f"{random_string()}.srt"
             while ru_subs_path.exists():
-                ru_subs_path = self._tempDirectory_path / f"{''.join(choices(ascii_letters, k=20))}.srt"
+                ru_subs_path = self._tempDirectory_path / f"{random_string()}.srt"
             ru_subs_writer = subtitles_write(ru_subs_path)
             next(ru_subs_writer)
             while (line := russian_texts.get()) is not None:
@@ -439,6 +485,8 @@ class FFMpeg:
                         text=translator.translate(line.text, target=code),
                         lang=code
                     ))
+                fragment = get_wav_fragment(line.start, line.end)
+                sentences_origin.put(fragment)
                 translated_texts.put(translated_lines)
                 russian_texts.task_done()
 
@@ -468,6 +516,7 @@ class FFMpeg:
             self,
             /,
             translated_texts: Queue[list[Line]],
+            sentences_origin: Queue[Audio],
             translated_audio: list[Audio],
             translated_subtitles: list[Subtitles],
             audio_codes: set[str],
@@ -475,21 +524,49 @@ class FFMpeg:
     ) -> None:
         subs_writers: dict[str, tuple[Path, Generator]] = dict()
         for code in subtitle_codes.difference({'ru'}):
-            ru_subs_path = self._tempDirectory_path / f"{''.join(choices(ascii_letters, k=20))}.srt"
+            ru_subs_path = self._tempDirectory_path / f"{random_string()}.srt"
             while ru_subs_path.exists():
-                ru_subs_path = self._tempDirectory_path / f"{''.join(choices(ascii_letters, k=20))}.srt"
+                ru_subs_path = self._tempDirectory_path / f"{random_string()}.srt"
             ru_subs_writer = subtitles_write(ru_subs_path)
             next(ru_subs_writer)
             subs_writers[code] = (ru_subs_path, ru_subs_writer)
 
+        previous_lines = []
         while (lines := translated_texts.get()) is not None:
+            sentence_origin = sentences_origin.get_nowait()
+            if previous_lines:
+                difference = lines[0].start - previous_lines[0].end
             for line in lines:
-                if line.lang in audio_codes:
-                    # TODO: TTS
-                    pass
                 if line.lang in subtitle_codes:
                     subs_writers[line.lang][1].send(line)
+            for line in previous_lines:
+                if line.lang in audio_codes:
+                    aud_paths = [
+                        self._tempDirectory_path / f'{random_string()}.wav',
+                        self._tempDirectory_path / f'{random_string()}.wav'
+                    ]
+                    tts_line(
+                        text=line.text,
+                        output=aud_paths[0],
+                        source_wav_fragment=sentence_origin.source,
+                        silence_amount=difference,
+                        silence_output=aud_paths[1]
+                    )
+                    generated_info = [
+                        self.get_info(aud_paths[0])[1][0],
+                        self.get_info(aud_paths[1])[1][0]
+                    ]
+                    for aud_path, info in zip(aud_paths, generated_info):
+                        translated_audio.append(Audio(
+                            index=0,
+                            codec=info.codec,
+                            language=line.lang,
+                            bitrate=info.bitrate,
+                            source=aud_path,
+                            frequency=info.frequency
+                        ))
             translated_texts.task_done()
+            previous_lines = lines
 
         for code, (path, gen) in subs_writers.items():
             with suppress(GeneratorExit):
@@ -516,9 +593,11 @@ class FFMpeg:
         assert isinstance(audio_codes, set)
         assert isinstance(subtitle_codes, set)
         source_info = self.get_info(source)
+        wav_file = self.aac_to_wav(source_info[1][0].source)
 
         russian_texts: Queue[Optional[Line]] = Queue(maxsize=0)
         translated_texts: Queue[Optional[list[Line]]] = Queue(maxsize=0)
+        sentences_origin: Queue[Audio] = Queue(maxsize=0)
         translated_audio: list[Audio] = []
         translated_subtitles: list[Subtitles] = []
 
@@ -528,6 +607,8 @@ class FFMpeg:
                 'russian_texts': russian_texts,
                 'translated_texts': translated_texts,
                 'translated_subtitles': translated_subtitles,
+                'sentences_origin': sentences_origin,
+                'get_wav': partialmethod(self.extract_wav_fragment, wav_file=wav_file),
                 'audio_codes': audio_codes,
                 'subtitle_codes': subtitle_codes
             },
@@ -540,23 +621,22 @@ class FFMpeg:
                 'translated_texts': translated_texts,
                 'translated_audio': translated_audio,
                 'translated_subtitles': translated_subtitles,
+                'sentences_origin': sentences_origin,
                 'audio_codes': audio_codes,
                 'subtitle_codes': subtitle_codes
             },
             name='Translated text analyzer thread'
         )
         translated_text_thread.start()
-        from time import sleep
+
         stt_thread = Thread(
-            target=lambda x: sleep(5),
-            args=[russian_texts],
+            target=self._stt,
+            kwargs={
+                'russian_texts': russian_texts
+            },
             name='STT thread'
         )
         stt_thread.start()
-
-        russian_texts.put(Line(1, 2, 'Я крутой, не думаешь?', lang='ru'))
-        russian_texts.put(Line(3, 4, 'Кто здесь самый крутой?', lang='ru'))
-        russian_texts.put(Line(4.1, 6.2, 'Я лучший', lang='ru'))
 
         stt_thread.join()
         russian_texts.put(None)
