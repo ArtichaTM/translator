@@ -712,7 +712,7 @@ class FFMpeg:
         for audio in translated_audio:
             combined_sounds += AudioSegment.from_wav(str(audio.source.absolute()))
         custom_path = self._tempDirectory_path / f"{random_string()}.wav"
-        combined_sounds.export(str(custom_path.absolute()))
+        combined_sounds.export(str(custom_path.absolute()), codec='wav')
         mc.add(Audio(None, None, None, None, custom_path, None, skip_validators=True))
         for subtitle in translated_subtitles:
             mc.add(subtitle)
