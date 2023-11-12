@@ -1,3 +1,5 @@
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install torch --index-url https://download.pytorch.org/whl/cu121
 pip install argostranslate
-python check_install.py
+pip install pydub
+pip install TTS
+python src/check_install.py
