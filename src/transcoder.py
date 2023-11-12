@@ -1,4 +1,4 @@
-from functools import partialmethod
+from functools import partial
 from typing import Callable, Generator, Optional, Union
 from pathlib import Path
 from abc import ABC
@@ -12,9 +12,12 @@ from random import choices
 from string import ascii_letters
 from contextlib import suppress
 
+from pydub import AudioSegment
+
 from .subtitles import subtitles_write, Line
 from .translator import Translator
 from .tts import tts_line
+from .stt import process as stt_process
 
 
 __all__ = ('FFMpeg', 'MediaContainer')
@@ -28,6 +31,7 @@ def resolve_path(path: Union[str, Path]) -> Path:
 
 def random_string() -> str:
     return ''.join(choices(ascii_letters, k=20))
+
 
 class _DataType(ABC):
     __slots__ = ('index', 'codec', 'language', 'source')
@@ -205,6 +209,9 @@ class FFMpeg:
         self._tempDirectory_path = None
 
     def _call_ffmpeg(self, parameters: str) -> str:
+        """ Low-level function to make calls to FFMpeg
+        :param parameters: parameters passed to ffmpeg executable. "ffmpeg " already placed
+        """
         with TemporaryFile(mode='r+') as f:
             run(
                 f"{self.ffmpeg} {parameters}",
@@ -216,7 +223,13 @@ class FFMpeg:
             f.seek(0)
             return f.read()
 
-    def build_mc(self, path: Union[str, Path], mc: MediaContainer, overwrite_ok: bool = False):
+    def build_mc(self, path: Union[str, Path], mc: MediaContainer, overwrite_ok: bool = False) -> None:
+        """ Bulds MediaContainer to target path
+        :param path: Path to target. Extensions matters (.mkv/.mp4)
+        :param mc: Media Container, containing at least 1 video and 1 audio track
+        :param overwrite_ok: Replace existing file, if exists
+        :return: None
+        """
         assert isinstance(mc, MediaContainer)
         assert isinstance(overwrite_ok, bool)
         path = resolve_path(path)
@@ -238,10 +251,17 @@ class FFMpeg:
                 inputs_l.append(object.source)
                 input_index = len(inputs_l)-1
             maps.append(f"-map {input_index}:{object.index}")
+        print(
+            ' '.join([
+                *[f'-i "{i.absolute()}"' for i in inputs_l],
+                # *maps TODO:
+            ]) + ' ' +
+            ' -c copy -shortest ' +
+            '"' + str(path.absolute()) + '"')
         self._call_ffmpeg(
             ' '.join([
                 *[f'-i "{i.absolute()}"' for i in inputs_l],
-                *maps
+                # *maps TODO:
             ]) + ' ' +
             ' -c copy -shortest ' +
             '"' + str(path.absolute()) + '"'
@@ -252,8 +272,15 @@ class FFMpeg:
             path: Union[str, Path],
             skip_validators: bool = False
     ) -> tuple[list[Video], list[Audio], list[Subtitles]]:
+        """ Analyzes target media/video/audio container.
+        Returns tuple of lists of different media type. Each can be empty, but not None
+        :param path: path to container. Extension doesn't matter
+        :param skip_validators: Assume everything valid and create all classes without validators. Use this only for 
+            gathering files to instatly build it into MediaContainer.
+        :return: list of Videos, list of Audio and list of Subtitles
+        """
         if skip_validators:
-            info_parse(self._call_ffmpeg(f'-i "{path}"'), source=path, skip_validators=skip_validators)
+            info_parse(self._call_ffmpeg(f'-i "{path}"'), source=path)
         path = resolve_path(path)
         if not path.exists():
             raise ValueError('Path is not correct')
@@ -268,6 +295,15 @@ class FFMpeg:
             to_path: Union[str, Path] = None,
             to_stdout: bool = False
     ) -> Optional[dict]:
+        """ Analyzes folder of .mp4 files and:
+        1. to_paths is None, to_stdout == False: return dictionary of of values
+        2. to_paths is not None: saves information in file as plain text
+        3. to_stdout == True: prints info in stdout
+        :param path: path to folder of media files. Can contain other files than .mp4
+        :param to_path: file to write information
+        :param to_stdout: Print info to console. If to_path is not None, this parameter will be ignored
+        :return: dictionary with keys as strings and sets of different values as value
+        """
         path = resolve_path(path)
         output: dict[str, set[Union[float, int, str, tuple[int, int]]]] = dict()
 
@@ -337,6 +373,10 @@ class FFMpeg:
         return self.get_info(target_aac)[1][0]
 
     def aac_to_wav(self, audio_source: Union[str, Path]) -> Audio:
+        """ Converts aac to wav format and saves it into temporary directory
+        :param audio_source:
+        :return: Audio with all necessary information
+        """
         audio_source = resolve_path(audio_source)
         if not audio_source.exists():
             raise ValueError('Path is not correct')
@@ -440,7 +480,14 @@ class FFMpeg:
             new_video.rename(video_source.absolute().parent / name)
 
     def extract_wav_fragment(self, start: float, end: float, /, wav_file: Audio) -> Audio:
-        pass
+        path = self._tempDirectory_path / f"{random_string()}.wav"
+        self._call_ffmpeg(' '.join([
+            f'-i {wav_file.source.absolute()}',
+            f'-ss {start}',
+            f'-t {end-start}',
+            f'{path.absolute()}'
+        ]))
+        return Audio(None, None, None, None, path, None, skip_validators=True)
 
     def _stt(
             self,
@@ -448,13 +495,21 @@ class FFMpeg:
             russian_texts: Queue[Line],
             audio_codes: set[str],
             subtitle_codes: set[str],
+            wav_file: Audio,
     ):
-        # TODO: STT
-        from time import sleep
-        russian_texts.put(Line(1, 2, 'Я крутой, не думаешь?', lang='ru'))
-        russian_texts.put(Line(3, 4, 'Кто здесь самый крутой?', lang='ru'))
-        russian_texts.put(Line(4.1, 6.2, 'Я лучший', lang='ru'))
-        sleep(5)
+        generator = stt_process(wav_file.source, self._tempDirectory_path)
+        for i in generator:
+            if 'result' not in i:
+                continue
+            text = i['text']
+            start = i['result'][0]['start']
+            end = i['result'][-1]['end']
+            russian_texts.put(Line(
+                text=text,
+                start=start,
+                end=end,
+                lang='ru'
+            ))
 
     def _texts(
             self,
@@ -465,7 +520,7 @@ class FFMpeg:
             sentences_origin: Queue[Audio],
             audio_codes: set[str],
             subtitle_codes: set[str],
-            get_wav_fragment: Callable[[float, float], Audio]
+            get_wav: Callable[[float, float], Audio]
     ) -> None:
         all_codes = audio_codes.union(subtitle_codes).difference({'ru'})
         translator = Translator()
@@ -485,7 +540,7 @@ class FFMpeg:
                         text=translator.translate(line.text, target=code),
                         lang=code
                     ))
-                fragment = get_wav_fragment(line.start, line.end)
+                fragment = get_wav(line.start, line.end)
                 sentences_origin.put(fragment)
                 translated_texts.put(translated_lines)
                 russian_texts.task_done()
@@ -509,6 +564,8 @@ class FFMpeg:
                         text=translator.translate(line.text, target=code),
                         lang=code
                     ))
+                fragment = get_wav(line.start, line.end)
+                sentences_origin.put(fragment)
                 translated_texts.put(translated_lines)
                 russian_texts.task_done()
 
@@ -533,7 +590,7 @@ class FFMpeg:
 
         previous_lines = []
         while (lines := translated_texts.get()) is not None:
-            sentence_origin = sentences_origin.get_nowait()
+            sentence_origin = sentences_origin.get()
             if previous_lines:
                 difference = lines[0].start - previous_lines[0].end
             for line in lines:
@@ -565,6 +622,7 @@ class FFMpeg:
                             source=aud_path,
                             frequency=info.frequency
                         ))
+            sentences_origin.task_done()
             translated_texts.task_done()
             previous_lines = lines
 
@@ -594,6 +652,7 @@ class FFMpeg:
         assert isinstance(subtitle_codes, set)
         source_info = self.get_info(source)
         wav_file = self.aac_to_wav(source_info[1][0].source)
+        print(self._tempDirectory_path)
 
         russian_texts: Queue[Optional[Line]] = Queue(maxsize=0)
         translated_texts: Queue[Optional[list[Line]]] = Queue(maxsize=0)
@@ -608,7 +667,7 @@ class FFMpeg:
                 'translated_texts': translated_texts,
                 'translated_subtitles': translated_subtitles,
                 'sentences_origin': sentences_origin,
-                'get_wav': partialmethod(self.extract_wav_fragment, wav_file=wav_file),
+                'get_wav': partial(self.extract_wav_fragment, wav_file=wav_file),
                 'audio_codes': audio_codes,
                 'subtitle_codes': subtitle_codes
             },
@@ -632,7 +691,10 @@ class FFMpeg:
         stt_thread = Thread(
             target=self._stt,
             kwargs={
-                'russian_texts': russian_texts
+                'russian_texts': russian_texts,
+                'wav_file': wav_file,
+                'audio_codes': audio_codes,
+                'subtitle_codes': subtitle_codes
             },
             name='STT thread'
         )
@@ -644,11 +706,17 @@ class FFMpeg:
         text_thread.join()
         translated_text_thread.join()
 
+        combined_sounds = AudioSegment.empty()
         mc = MediaContainer()
         mc.add(source_info[0][0])  # Original audio
         for audio in translated_audio:
-            mc.add(audio)
+            combined_sounds += AudioSegment.from_wav(str(audio.source.absolute()))
+        custom_path = self._tempDirectory_path / f"{random_string()}.wav"
+        combined_sounds.export(str(custom_path.absolute()))
+        mc.add(Audio(None, None, None, None, custom_path, None, skip_validators=True))
         for subtitle in translated_subtitles:
             mc.add(subtitle)
+        print(translated_audio, translated_subtitles)
+        print(mc.objects)
 
         self.build_mc(target, mc=mc, overwrite_ok=True)

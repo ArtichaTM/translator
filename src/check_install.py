@@ -44,7 +44,7 @@ def update() -> None:
         mm_path.mkdir(parents=True)
     if not mm_path.exists():
         mm_path.touch(exist_ok=True)
-    TTS("tts_models/multilingual/multi-dataset/bark")
+    # TTS("tts_models/multilingual/multi-dataset/bark")
     TTS("tts_models/multilingual/multi-dataset/xtts_v2")
 
 

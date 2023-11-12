@@ -50,6 +50,7 @@ def combine_sentences(sentences):
     # Создаем wav файла для последнего объединенного предложения
     create_combined_wav(combined_text, total_dur, count)
 
+
 def create_silent_wav(duration, count, path: Path):
     # Создаем пустой wav файл заданной длительности
     silence = AudioSegment.silent(duration * 1000)
@@ -96,6 +97,7 @@ def tts_line(
         file_path=str(output.absolute()),
         language='ru'
     )
+    create_silent_wav(silence_amount, None, silence_output)
 
 
 def main():
