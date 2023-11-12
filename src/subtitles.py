@@ -1,26 +1,30 @@
 from pathlib import Path
-from typing import Generator, Iterable, Union
+from typing import Generator, Iterable, Optional, Union
 
 
 __all__ = ('Line', 'subtitles_write')
 
 
 class Line:
-    __slots__ = ('start', 'end', 'text')
+    __slots__ = ('start', 'end', 'text', 'lang')
 
-    def __init__(self, start: float, end: float, text: str):
+    def __init__(self, start: float, end: float, text: str, lang: str):
         assert isinstance(start, (int, float))
         assert isinstance(end, (int, float))
         assert isinstance(text, str)
+        assert isinstance(lang, str)
         self.start = start
         self.end = end
         self.text = text
+        self.lang = lang
 
     def __repr__(self) -> str:
-        return (f'<Line '
-                f'from {self.float_to_srt_time(self.start)} '
-                f'to {self.float_to_srt_time(self.end)} '
-                f'with text={self.text}>')
+        return (
+            f'<Line '
+            f'from {self.float_to_srt_time(self.start)} '
+            f'to {self.float_to_srt_time(self.end)} '
+            f'with text={self.text}>'
+        )
 
     @staticmethod
     def float_to_srt_time(value: float) -> str:
@@ -38,7 +42,7 @@ class Line:
         ]
 
 
-def subtitles_write(path: Union[str, Path] = 'sub.srt') -> Generator[int, Union[Iterable[Line], Line], None]:
+def subtitles_write(path: Union[str, Path] = 'sub.srt') -> Generator[int, Optional[Line], None]:
     if isinstance(path, str):
         if not path.endswith('.srt'):
             path = path + '.str'
@@ -59,26 +63,18 @@ def subtitles_write(path: Union[str, Path] = 'sub.srt') -> Generator[int, Union[
                     *text.as_srt_line(),
                     '\n'
                 ]))
+                f.flush()
                 counter += 1
             else:
-                for line in text:
-                    assert isinstance(line, Line)
-                    f.write('\n'.join([
-                        str(counter),
-                        *line.as_srt_line(),
-                        '\n'
-                    ]))
-                    counter += 1
+                raise TypeError(f'Awaited line, got {text}')
 
 
 def main():
-    xz = subtitles_write('subls.srt')
-    next(xz)
-    xz.send(Line(20, 30, 'Привет'))
-    xz.send([
-        Line(33, 40, 'Как твои дела?'),
-        Line(44, 50, 'Ты крутой?')
-    ])
+    gen = subtitles_write('subls.srt')
+    next(gen)
+    gen.send(Line(20, 30, 'Привет'))
+    gen.send(Line(33, 40, 'Как твои дела?'))
+    gen.send(Line(44, 50, 'Ты крутой?'))
 
 
 if __name__ == '__main__':

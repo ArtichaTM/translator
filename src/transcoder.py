@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Union
+from typing import Callable, Generator, Optional, Union
 from pathlib import Path
 from abc import ABC
 from re import findall, finditer
@@ -9,6 +9,7 @@ from queue import Queue
 from threading import Thread
 from random import choices
 from string import ascii_letters
+from contextlib import suppress
 
 from .subtitles import subtitles_write, Line
 from .translator import Translator
@@ -416,46 +417,92 @@ class FFMpeg:
             /,
             russian_texts: Queue[Line],
             translated_texts: Queue[list[Line]],
+            translated_subtitles: list[Subtitles],
             audio_codes: set[str],
             subtitle_codes: set[str]
     ) -> None:
-        all_codes = audio_codes.union(subtitle_codes)
+        all_codes = audio_codes.union(subtitle_codes).difference({'ru'})
         translator = Translator()
         if 'ru' in subtitle_codes:
             ru_subs_path = self._tempDirectory_path / f"{''.join(choices(ascii_letters, k=20))}.srt"
+            while ru_subs_path.exists():
+                ru_subs_path = self._tempDirectory_path / f"{''.join(choices(ascii_letters, k=20))}.srt"
             ru_subs_writer = subtitles_write(ru_subs_path)
             next(ru_subs_writer)
-            while line := russian_texts.get() is not None:
+            while (line := russian_texts.get()) is not None:
                 ru_subs_writer.send(line)
                 translated_lines: list[Line] = []
                 for code in all_codes:
                     translated_lines.append(Line(
                         start=line.start,
                         end=line.end,
-                        text=translator.translate(line.text, target=code)
+                        text=translator.translate(line.text, target=code),
+                        lang=code
                     ))
                 translated_texts.put(translated_lines)
-                print(f'Completed translating {line}')
+                russian_texts.task_done()
+
+            with suppress(GeneratorExit):
+                ru_subs_writer.close()
+            subtitle_info = self.get_info(ru_subs_path)[2][0]
+            translated_subtitles.append(Subtitles(
+                index=subtitle_info.index,
+                codec=subtitle_info.codec,
+                language='ru',
+                source=ru_subs_path
+            ))
         else:
-            while line := russian_texts.get() is not None:
+            while (line := russian_texts.get()) is not None:
                 translated_lines: list[Line] = []
                 for code in all_codes:
                     translated_lines.append(Line(
                         start=line.start,
                         end=line.end,
-                        text=translator.translate(line.text, target=code)
+                        text=translator.translate(line.text, target=code),
+                        lang=code
                     ))
                 translated_texts.put(translated_lines)
+                russian_texts.task_done()
 
     def _translated_texts(
             self,
             /,
             translated_texts: Queue[list[Line]],
+            translated_audio: list[Audio],
+            translated_subtitles: list[Subtitles],
             audio_codes: set[str],
             subtitle_codes: set[str]
     ) -> None:
-        while text := translated_texts.get() is not None:
-            pass
+        subs_writers: dict[str, tuple[Path, Generator]] = dict()
+        for code in subtitle_codes.difference({'ru'}):
+            ru_subs_path = self._tempDirectory_path / f"{''.join(choices(ascii_letters, k=20))}.srt"
+            while ru_subs_path.exists():
+                ru_subs_path = self._tempDirectory_path / f"{''.join(choices(ascii_letters, k=20))}.srt"
+            ru_subs_writer = subtitles_write(ru_subs_path)
+            next(ru_subs_writer)
+            subs_writers[code] = (ru_subs_path, ru_subs_writer)
+
+        while (lines := translated_texts.get()) is not None:
+            for line in lines:
+                if line.lang in audio_codes:
+                    # TODO: TTS
+                    pass
+                if line.lang in subtitle_codes:
+                    subs_writers[line.lang][1].send(line)
+            translated_texts.task_done()
+
+        for code, (path, gen) in subs_writers.items():
+            with suppress(GeneratorExit):
+                gen.close()
+            subtitle_info = self.get_info(path)[2][0]
+            translated_subtitles.append(Subtitles(
+                index=subtitle_info.index,
+                codec=subtitle_info.codec,
+                language=code,
+                source=path
+            ))
+
+        # TODO: TTS files
 
     def run(
             self,
@@ -469,70 +516,59 @@ class FFMpeg:
         assert isinstance(audio_codes, set)
         assert isinstance(subtitle_codes, set)
         source_info = self.get_info(source)
-        source_container = MediaContainer.from_datatypes(source_info)
 
-        russian_texts: Queue[Line] = Queue(maxsize=0)
-        translated_texts: Queue[list[Line]] = Queue(maxsize=0)
+        russian_texts: Queue[Optional[Line]] = Queue(maxsize=0)
+        translated_texts: Queue[Optional[list[Line]]] = Queue(maxsize=0)
+        translated_audio: list[Audio] = []
+        translated_subtitles: list[Subtitles] = []
+
         text_thread = Thread(
             target=self._texts,
             kwargs={
                 'russian_texts': russian_texts,
                 'translated_texts': translated_texts,
+                'translated_subtitles': translated_subtitles,
                 'audio_codes': audio_codes,
                 'subtitle_codes': subtitle_codes
             },
-            name='text analyzer thread'
+            name='Text analyzer thread'
         )
         text_thread.start()
         translated_text_thread = Thread(
             target=self._translated_texts,
             kwargs={
                 'translated_texts': translated_texts,
+                'translated_audio': translated_audio,
+                'translated_subtitles': translated_subtitles,
                 'audio_codes': audio_codes,
                 'subtitle_codes': subtitle_codes
             },
-            name='translated text analyzer thread'
+            name='Translated text analyzer thread'
         )
         translated_text_thread.start()
+        from time import sleep
+        stt_thread = Thread(
+            target=lambda x: sleep(5),
+            args=[russian_texts],
+            name='STT thread'
+        )
+        stt_thread.start()
 
-        russian_texts.appe
+        russian_texts.put(Line(1, 2, 'Я крутой, не думаешь?', lang='ru'))
+        russian_texts.put(Line(3, 4, 'Кто здесь самый крутой?', lang='ru'))
+        russian_texts.put(Line(4.1, 6.2, 'Я лучший', lang='ru'))
 
-        translated_audio: list[Audio] = []
-        translated_subtitles: list[Video] = []
+        stt_thread.join()
+        russian_texts.put(None)
+        translated_texts.put(None)
+        text_thread.join()
+        translated_text_thread.join()
 
+        mc = MediaContainer()
+        mc.add(source_info[0][0])  # Original audio
+        for audio in translated_audio:
+            mc.add(audio)
+        for subtitle in translated_subtitles:
+            mc.add(subtitle)
 
-# TODO: Create many video with different languages
-from timeit import default_timer as timer
-
-
-def main():
-    source_mkv = Path(r'C:\Users\Articha\Desktop\EveryThing\Media\Videos\Anime\Fate\ASaber vs Rider.mkv')
-    videos_folder = Path(r'C:\Users\Articha\Desktop\Temp\Python\translator\Rutube\videos')
-    source_mp4_1 = videos_folder / '8.mp4'
-    source_mp4_2 = videos_folder / '12.mp4'
-    with FFMpeg(r'bin\ffmpeg.exe') as ffmpeg:
-        # ffmpeg.edit_video('ыф.mp4', lambda x: print(x), replace=False)
-        new_folder = videos_folder.parent / 'videos2'
-        start_time = timer()
-        for file in videos_folder.iterdir():
-            if not file.name.endswith('.mp4'):
-                print('what is it', file)
-                continue
-            mp4 = ffmpeg.get_info(file)
-            aac = ffmpeg.extract_audio(file)
-            mc = MediaContainer.from_datatypes(mp4)
-            mc.add(aac)
-            new_name = new_folder / file.name
-            ffmpeg.build_mc(new_name, mc=mc, overwrite_ok=True)
-        print(f'Finished in {timer() - start_time}')
-
-        # mp4_1 = ffmpeg.get_info(source_mp4_1)
-        # aac_2 = ffmpeg.extract_audio(source_mp4_1)
-        # mc = MediaContainer.from_datatypes(mp4_1)
-        # mc.add(aac_2)
-        # ffmpeg.build_mc('file.mp4', mc=mc, overwrite_ok=True)
-        # print()
-
-
-if __name__ == '__main__':
-    main()
+        self.build_mc(target, mc=mc, overwrite_ok=True)

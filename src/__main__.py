@@ -47,7 +47,7 @@ def main() -> int:
     args = parser.parse_args()
     source: Path = args.input
     target: Path = args.output
-    subtitles: set[str] = set(args.subtitles)
+    subtitles: set[str] = set(args.subtitles) if args.subtitles else set()
     audio: set[str] = set(args.audio)
 
     codes_stt = set(get_available_languages_stt())
