@@ -2,6 +2,7 @@ from sys import exit
 from argparse import ArgumentParser
 from pathlib import Path
 from unittest.mock import Mock
+import os
 
 from . import FFMpeg, Translator, MediaContainer
 
@@ -76,9 +77,15 @@ def main() -> int:
         print('Source file does not exist')
         return 4
 
-    translator = Translator()
+    if os.name == 'posix':
+        ffmpeg_path = 'ffmpeg'
+    else:
+        ffmpeg_path = Path('bin/ffmpeg.exe')
+        if not ffmpeg_path.exists():
+            print(f'FFMpeg.exe не найден в папке {ffmpeg_path.parent.absolute()}')
+            return 5
 
-    with FFMpeg(Path('bin/ffmpeg.exe')) as ffmpeg:
+    with FFMpeg(ffmpeg_path) as ffmpeg:
         ffmpeg.run(
             source=source,
             target=target,
